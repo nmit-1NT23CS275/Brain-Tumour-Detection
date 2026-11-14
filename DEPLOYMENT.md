@@ -13,8 +13,36 @@ streamlit run app.py
 
 1. Push the project to a Git repository.
 2. Ensure `requirements.txt` is committed.
-3. Set the entrypoint to `app.py`.
-4. Upload or mount the trained model and required artifacts.
+3. Ensure `runtime.txt` contains the supported Python major/minor version (`3.11`).
+4. Set the entrypoint to `app.py`.
+5. Upload or mount the trained model and required artifacts.
+
+The `runtime.txt` pin is required because the application uses TensorFlow 2.15.0,
+which does not provide a Python 3.14 wheel. `setuptools<81` is retained as a
+compatibility guard for build environments that still import `pkg_resources`;
+PyArrow 15.0.2 is installed from its Python 3.11 wheel rather than built from
+source.
+
+## Vercel compatibility
+
+This repository is a Streamlit application, not a Flask application. The top-level
+`app.py` intentionally defines Streamlit pages and `main()`; it does not define a
+Flask WSGI object named `app`, `application`, or `handler`. Therefore Vercel's
+Flask/Python entrypoint detection error cannot be fixed by adding an alias without
+replacing the existing application architecture and UI.
+
+Vercel is not a supported deployment target for the current application because:
+
+- Streamlit requires a long-lived application server and WebSocket session model.
+- The project pins TensorFlow 2.15, while current Vercel Python runtimes target newer
+  Python versions and serverless function bundle limits apply.
+- No trained `models/exports/best_model.keras` artifact is tracked in this repository.
+  The application cannot provide production inference until that artifact is supplied
+  through a suitable deployment volume or inference service.
+
+Deploy this project with Streamlit Community Cloud or a persistent Python host. A
+Vercel deployment requires a separate Flask/API migration and a separately hosted
+inference service; that migration must not be presented as a configuration-only fix.
 
 ## Server deployment
 
