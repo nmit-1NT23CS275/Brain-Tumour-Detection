@@ -5218,6 +5218,19 @@ def main() -> None:
             st.session_state["page"] = "dashboard"
 
     page = st.session_state.get("page", "home")
+    # Render the workspace marker before the sidebar so its CSS selectors are
+    # available during the same Streamlit render as the navigation controls.
+    if page in {"doctor_pending", "doctor_pending_profile", "doctor_pending_mastishka"}:
+        st.markdown('<div class="pending-workspace-marker"></div>', unsafe_allow_html=True)
+    elif page == "accept_invitation":
+        st.markdown('<div class="doctor-workspace-marker"></div>', unsafe_allow_html=True)
+    elif is_admin():
+        st.markdown('<div class="admin-workspace-marker"></div>', unsafe_allow_html=True)
+    elif is_doctor() and current_user_status() in ("active", "approved"):
+        st.markdown('<div class="doctor-workspace-marker"></div>', unsafe_allow_html=True)
+    elif is_patient() and current_user_status() == "active":
+        st.markdown('<div class="patient-workspace-marker"></div>', unsafe_allow_html=True)
+
     if page in {"doctor_pending", "doctor_pending_profile", "doctor_pending_mastishka"}:
         inject_doctor_workspace_theme()
     elif page == "accept_invitation" or (
