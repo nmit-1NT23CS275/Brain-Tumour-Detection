@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import cv2
 import numpy as np
 import pytest
 
@@ -225,8 +226,6 @@ def test_unet_segmentation_components_and_fallback():
     assert "disclaimer" in res
     assert "Region highlight (heuristic)" in res["method"] or "U-Net" in res["method"]
     assert "NOT intended for clinical diagnosis" in res["disclaimer"]
-
-
 
 
 

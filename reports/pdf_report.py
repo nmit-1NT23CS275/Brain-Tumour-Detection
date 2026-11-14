@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from datetime import datetime
+from xml.sax.saxutils import escape
 from typing import Optional
 
 import numpy as np
@@ -78,6 +79,7 @@ def generate_pdf_report(
     recommendations: list[str] | None = None,
     model_name: str | None = None,
     quality_label: str | None = None,
+    clinical_notes: list[dict] | None = None,
 ) -> bytes:
     """Generate an expanded PDF report with images and AI interpretation."""
     styles = _styles()
@@ -123,6 +125,23 @@ def generate_pdf_report(
         story.append(Spacer(1, 0.15 * cm))
         story.append(Paragraph(ai_summary, styles["body"]))
     story.append(Spacer(1, 0.3 * cm))
+
+    if clinical_notes:
+        story.append(Paragraph("Clinician-documented review", styles["section"]))
+        for note in clinical_notes:
+            clinician = escape(str(note.get("doctor_name") or "Clinician"))
+            created_at = escape(str(note.get("created_at") or ""))
+            note_content = escape(str(note.get("note_content") or "")).replace("\n", "<br/>")
+            story.append(Paragraph(f"<b>{clinician}</b> {created_at}", styles["small"]))
+            if note_content:
+                story.append(Paragraph(note_content, styles["body"]))
+            recommendation = note.get("recommendation")
+            if recommendation:
+                safe_recommendation = escape(str(recommendation)).replace("\n", "<br/>")
+                story.append(
+                    Paragraph(f"<b>Clinician recommendation:</b> {safe_recommendation}", styles["body"])
+                )
+            story.append(Spacer(1, 0.15 * cm))
 
     story.append(Paragraph("MRI Visual Outputs", styles["section"]))
     image_row = [_numpy_to_rl_image(original_img, 5, 5), _numpy_to_rl_image(preprocessed_img, 5, 5)]

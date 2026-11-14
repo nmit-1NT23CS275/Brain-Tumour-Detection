@@ -6,7 +6,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import _save_scan_result
-from database.db import create_patient_record, get_prediction_by_id
+from database.db import create_patient_record, get_prediction_by_id, get_user_by_identifier
 
 
 class DummyFile:
@@ -25,9 +25,13 @@ def test_save_scan_result_with_patient_record():
     dummy_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\rIDATx\x9cc`\x00\x00\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82"
     dummy_file = DummyFile("test_mri_pytest.png", dummy_bytes)
 
-    # 1. Create patient record (user_id=24: demo_patient)
+    patient_user = get_user_by_identifier("patient.demo@example.com")
+    assert patient_user is not None
+    patient_user_id = patient_user["id"]
+
+    # 1. Create patient record for the seeded demo patient.
     patient_rec_id = create_patient_record(
-        user_id=24,
+        user_id=patient_user_id,
         patient_name="Pytest Patient",
         patient_age=40,
         patient_gender="Female",
@@ -56,12 +60,12 @@ def test_save_scan_result_with_patient_record():
         result=result,
         uploaded_file=dummy_file,
         patient_id=patient_rec_id,
-        target_user_id=24,
+        target_user_id=patient_user_id,
     )
     assert pred_id > 0
 
     # 3. Retrieve and assert
     saved = get_prediction_by_id(pred_id)
     assert saved is not None
-    assert saved["user_id"] == 24
+    assert saved["user_id"] == patient_user_id
     assert saved["patient_id"] == patient_rec_id

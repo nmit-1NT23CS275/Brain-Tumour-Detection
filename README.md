@@ -34,14 +34,15 @@
 ### 4. 📋 Doctor Add Patient & Scan Patient Workflows
 - **Unique Patient Identifier (`PAT-XXXXXX`)**: Every patient receives an immutable backend-generated patient code (e.g. `PAT-000014`).
 - **`+ Add Patient`**:
-  - **Search Existing Patient**: Search by Email, Phone, or Patient Code (`PAT-XXXXXX`) to establish active associations without creating duplicate accounts.
-  - **Register New Patient**: Full registration form (Name, Email, Phone, DOB, Gender, Address, Medical Notes) creating patient accounts and active doctor relationships.
-- **`🔬 Scan Patient`**: Approved doctors can initiate brain MRI scans specifically linked to authorized patient records. Results automatically appear in the patient's personal report history.
-- **Strict Backend Authorization**: Doctors cannot scan or view arbitrary patient records unless an active relationship is verified by backend middleware (`can_doctor_scan_patient`).
+  - **Search Existing Patient**: Search by name, email, phone, or patient code (`PAT-XXXXXX`) and send an invitation without granting access.
+  - **Register New Patient**: Create a patient account and send a relationship invitation. New patients set a password and verify their phone before accepting.
+  - **Patient consent**: Doctor-created relationships remain pending until the patient explicitly accepts. Invitation tokens are stored as hashes and expire after seven days.
+- **`🔬 Scan Patient`**: Approved doctors can scan JPG or PNG MRI images (up to 10 MB) only for patients with an accepted relationship. Results are linked to that patient's account.
+- **Strict Backend Authorization**: Scan, report, and clinical-note access is checked against the active patient relationship; pending, declined, expired, or revoked invitations do not grant access.
 
 ### 5. 👥 Role-Based Access Control (RBAC) & Secure Auth
 - **Patient Workspace**: Upload MRI scans, view Grad-CAM heatmaps, download PDF reports, assign specialist doctors, and view attached doctor clinical notes.
-- **Doctor Clinical Workspace**: Manage patient roster, perform patient scans, inspect heatmaps, and append signed clinical observations & recommendations.
+- **Doctor Clinical Workspace**: Manage the patient roster, review scans, export reports, and save clinician-authored observations and recommendations. Saving a note does not constitute a formal digital signature.
 - **Admin Console**: Doctor verification portal, user account management, platform metrics, and immutable audit logging (`audit_logs`).
 - **Simulated OTP Flow**: Phone authentication uses simulated OTP delivery (logged to server logs for dev/testing; ready for SMS provider integration in production).
 
@@ -57,8 +58,8 @@ Below are the pre-configured **Demo Credentials**:
 
 | User Role | Email Address | Default Password | Account Status | Pre-Populated Demo Content |
 |---|---|---|---|---|
-| **👤 Demo Patient** | `patient.demo@example.com` | `Patient@123` | `ACTIVE` | Patient Code `PAT-000024`, 1 Sample Brain Scan Report (Glioma 96.8%), Assigned Specialist Doctor. |
-| **👨‍⚕️ Verified Doctor** | `doctor.demo@example.com` | `Doctor@123` | `APPROVED` | `MBBS, MD Neuro-oncology`, `NMC-DEMO-9948`, uploaded PDF Degree & License certificates, "My Patients" workspace containing `demo_patient`. |
+| **👤 Demo Patient** | `patient.demo@example.com` | `Patient@123` | `ACTIVE` | Demo patient account. Doctor access requires an accepted invitation. |
+| **👨‍⚕️ Verified Doctor** | `doctor.demo@example.com` | `Doctor@123` | `APPROVED` | Demo credential documents; patient access requires a patient-accepted invitation. |
 | **⏳ Pending Doctor** | `pending.doctor@example.com` | `Doctor@123` | `PENDING` | `MBBS, MD Pediatric Neurology`, `NMC-PENDING-7712`, uploaded PDF verification certificates for testing the Admin Verification & Approval workflow. |
 | **⚙️ Demo Admin** | `admin.demo@example.com` | `Admin@123` | `ACTIVE` | Full administrative privileges, Doctor Approval Queue, User Control, Metrics, & Audit Trail. |
 
@@ -155,6 +156,13 @@ Copy `.env.example` to `.env` to configure environment variables:
 | `DEMO_DOCTOR_PASSWORD` | `Doctor@123` | Password for demo doctor account. |
 | `DEMO_ADMIN_EMAIL` | `admin.demo@example.com` | Email address for demo admin account. |
 | `DEMO_ADMIN_PASSWORD` | `Admin@123` | Password for demo admin account. |
+| `APP_ENV` | `development` | Use `production` to disable development-mode OTP and invitation logging. |
+| `APP_BASE_URL` | `http://localhost:8501` | Public app URL used to construct patient invitation links. |
+| `SMTP_SERVER` | `smtp.gmail.com` | SMTP host for patient invitation email. |
+| `SMTP_PORT` | `587` | SMTP port for patient invitation email. |
+| `SMTP_USERNAME` | `""` | SMTP account used to send patient invitations. |
+| `SMTP_PASSWORD` | `""` | SMTP credential; keep it in `.env` or a secret manager, never in source control. |
+| `SMTP_FROM_EMAIL` | `SMTP_USERNAME` | Optional sender address for invitation email. |
 | `LLM_PROVIDER` | `""` (empty) | LLM provider (`openai`, `gemini`, `anthropic`, `ollama`, or empty for local offline fallback mode). |
 | `LLM_API_KEY` | `""` | API key for the selected cloud LLM provider. |
 | `LLM_MODEL` | `""` | Model identifier (e.g., `gemini-1.5-flash`, `gpt-3.5-turbo`, `claude-3-haiku-20240307`, `llama3`). |

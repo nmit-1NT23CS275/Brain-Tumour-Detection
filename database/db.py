@@ -8,7 +8,7 @@ import os
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from utils import configure_logging
@@ -73,7 +73,9 @@ def _create_demo_doctor_files(conn, user_id: int, degree_name: str, license_name
     )
 
 
-def _seed_sample_prediction(conn, patient_id: int, doctor_id: int) -> None:
+def _seed_sample_prediction(
+    conn, user_id: int, patient_record_id: int, doctor_id: int
+) -> None:
     dummy_img_bytes = b"MOCK_MRI_IMAGE_BYTES"
     conn.execute(
         """
@@ -88,7 +90,7 @@ def _seed_sample_prediction(conn, patient_id: int, doctor_id: int) -> None:
                   'Recommend immediate specialist neuro-oncology referral and enhanced contrast-enhanced MRI evaluation.',
                   'VGG16 Transfer Model', 'v1.0-demo', 0.142)
         """,
-        (patient_id, patient_id, doctor_id, dummy_img_bytes),
+        (user_id, patient_record_id, doctor_id, dummy_img_bytes),
     )
 
 
@@ -131,6 +133,19 @@ def initialize_database() -> None:
                 patient_gender TEXT,
                 notes TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS patient_profiles (
+                user_id INTEGER PRIMARY KEY,
+                patient_gender TEXT,
+                dob TEXT,
+                address TEXT,
+                medical_history TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
             """
@@ -208,6 +223,25 @@ def initialize_database() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS patient_invitations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_id INTEGER NOT NULL,
+                doctor_id INTEGER NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                relationship_role TEXT NOT NULL,
+                institution TEXT,
+                consent_note TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL,
+                responded_at TIMESTAMP,
+                FOREIGN KEY (patient_id) REFERENCES users(id),
+                FOREIGN KEY (doctor_id) REFERENCES users(id)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS clinical_notes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 prediction_id INTEGER NOT NULL,
@@ -216,6 +250,22 @@ def initialize_database() -> None:
                 recommendation TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (prediction_id) REFERENCES predictions(id),
+                FOREIGN KEY (doctor_id) REFERENCES users(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS patient_appointments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_id INTEGER NOT NULL,
+                doctor_id INTEGER NOT NULL,
+                scheduled_at TEXT NOT NULL,
+                appointment_type TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'scheduled',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (patient_id) REFERENCES users(id),
                 FOREIGN KEY (doctor_id) REFERENCES users(id)
             )
             """
@@ -298,6 +348,20 @@ def initialize_database() -> None:
             ("created_by", "TEXT DEFAULT 'patient'"),
         ]:
             _ensure_column(conn, "patient_doctor_assignments", column_name, column_type)
+
+        conn.execute(
+            """
+            UPDATE patient_doctor_assignments
+            SET status = 'active'
+            WHERE status = 'pending_consent' AND created_by = 'doctor'
+              AND NOT EXISTS (
+                  SELECT 1 FROM patient_invitations i
+                  WHERE i.patient_id = patient_doctor_assignments.patient_id
+                    AND i.doctor_id = patient_doctor_assignments.doctor_id
+                    AND i.status = 'pending'
+              )
+            """
+        )
 
         # Seed default admin user if not present
         admin_row = conn.execute("SELECT id FROM users WHERE role = 'admin' OR username = 'admin'").fetchone()
@@ -411,7 +475,7 @@ def initialize_database() -> None:
                 ),
             )
             demo_pat_id = cursor.lastrowid
-            conn.execute(
+            patient_record = conn.execute(
                 """
                 INSERT INTO patient_records (user_id, patient_name, patient_gender, dob, address, notes)
                 VALUES (?, 'Demo Patient', 'Male', '1988-04-12', '742 Evergreen Terrace', 'Patient history of recurring temporal headaches.')
@@ -421,13 +485,15 @@ def initialize_database() -> None:
             conn.execute(
                 """
                 INSERT INTO patient_doctor_assignments (patient_id, doctor_id, status, created_by)
-                VALUES (?, ?, 'active', 'doctor')
-                ON CONFLICT(patient_id, doctor_id) DO UPDATE SET status = 'active'
+                VALUES (?, ?, 'pending_consent', 'doctor')
+                ON CONFLICT(patient_id, doctor_id) DO UPDATE SET status = 'pending_consent'
                 """,
                 (demo_pat_id, demo_doc_id),
             )
             # Create sample MRI prediction record for demo patient
-            _seed_sample_prediction(conn, demo_pat_id, demo_doc_id)
+            _seed_sample_prediction(
+                conn, demo_pat_id, patient_record.lastrowid, demo_doc_id
+            )
 
         # Seed legacy default approved doctor & patient if missing
         doc_row = conn.execute("SELECT id FROM users WHERE username = 'dr_smith'").fetchone()
@@ -500,6 +566,74 @@ def get_user_by_id(user_id: int):
     return dict(row) if row else None
 
 
+def get_patient_profile(patient_id: int) -> dict | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT p.patient_gender, p.dob, p.address,
+                   p.medical_history, p.updated_at
+            FROM patient_profiles p
+            JOIN users u ON u.id = p.user_id
+            WHERE p.user_id = ? AND u.role = 'patient'
+            """,
+            (patient_id,),
+        ).fetchone()
+        if not row:
+            row = conn.execute(
+                """
+                SELECT r.patient_gender, r.dob, r.address, r.notes AS medical_history
+                FROM patient_records r
+                JOIN users u ON u.id = r.user_id
+                WHERE r.user_id = ? AND u.role = 'patient'
+                ORDER BY r.id DESC LIMIT 1
+                """,
+                (patient_id,),
+            ).fetchone()
+    return dict(row) if row else None
+
+
+def update_patient_profile(
+    patient_id: int,
+    patient_gender: str | None,
+    dob: str | None,
+    address: str | None,
+    medical_history: str | None,
+) -> bool:
+    with get_connection() as conn:
+        patient = conn.execute(
+            "SELECT id FROM users WHERE id = ? AND role = 'patient' AND status = 'active'",
+            (patient_id,),
+        ).fetchone()
+        if not patient:
+            return False
+        conn.execute(
+            """
+            INSERT INTO patient_profiles (
+                user_id, patient_gender, dob, address, medical_history, updated_at
+            ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id) DO UPDATE SET
+                patient_gender = excluded.patient_gender,
+                dob = excluded.dob,
+                address = excluded.address,
+                medical_history = excluded.medical_history,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                patient_id,
+                patient_gender or None,
+                dob or None,
+                address or None,
+                medical_history or None,
+            ),
+        )
+    log_audit_event(
+        user_id=patient_id,
+        action="patient_profile_updated",
+        resource=f"user:{patient_id}",
+    )
+    return True
+
+
 def verify_user(phone: str) -> bool:
     with get_connection() as conn:
         conn.execute("UPDATE users SET is_verified = 1 WHERE phone = ?", (phone,))
@@ -509,6 +643,43 @@ def verify_user(phone: str) -> bool:
 def update_last_login(user_id: int) -> None:
     with get_connection() as conn:
         conn.execute("UPDATE users SET last_login = ? WHERE id = ?", (datetime.now(), user_id))
+
+
+def update_user_password(user_id: int, hashed_password: str) -> bool:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE users SET password = ? WHERE id = ?",
+            (hashed_password, user_id),
+        )
+    return cursor.rowcount == 1
+
+
+def update_doctor_profile(
+    doctor_id: int,
+    hospital: str | None,
+    address: str | None,
+    years_experience: int,
+) -> bool:
+    if years_experience < 0:
+        raise ValueError("Years of experience cannot be negative.")
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE users
+            SET hospital = ?, address = ?, years_experience = ?
+            WHERE id = ? AND role = 'doctor'
+            """,
+            (hospital.strip() if hospital else None, address.strip() if address else None,
+             years_experience, doctor_id),
+        )
+    if cursor.rowcount == 1:
+        log_audit_event(
+            user_id=doctor_id,
+            action="doctor_profile_updated",
+            resource=f"user:{doctor_id}",
+        )
+        return True
+    return False
 
 
 def check_duplicate(username: str, email: str, phone: str) -> str | None:
@@ -788,8 +959,8 @@ def create_user_with_role(
                 INSERT INTO users (
                     username, email, phone, password, role, status,
                     specialization, qualification, license_no, hospital,
-                    years_experience, address
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    years_experience, address, is_verified
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     username.strip(),
@@ -804,6 +975,7 @@ def create_user_with_role(
                     hospital,
                     years_experience,
                     address,
+                    1,
                 ),
             )
             return int(cursor.lastrowid)
@@ -890,6 +1062,18 @@ def update_user_status(user_id: int, status: str, admin_id: int | None = None) -
 def assign_doctor_to_patient(patient_id: int, doctor_id: int) -> bool:
     try:
         with get_connection() as conn:
+            eligible = conn.execute(
+                """
+                SELECT 1
+                FROM users p, users d
+                WHERE p.id = ? AND p.role = 'patient' AND p.status = 'active'
+                  AND d.id = ? AND d.role = 'doctor'
+                  AND d.status IN ('active', 'approved')
+                """,
+                (patient_id, doctor_id),
+            ).fetchone()
+            if not eligible:
+                return False
             conn.execute(
                 """
                 INSERT INTO patient_doctor_assignments (patient_id, doctor_id, status)
@@ -916,11 +1100,148 @@ def get_assigned_doctors_for_patient(patient_id: int) -> list[dict]:
             SELECT u.id, u.username, u.email, u.phone, u.specialization, u.hospital, a.assigned_at
             FROM patient_doctor_assignments a
             JOIN users u ON a.doctor_id = u.id
-            WHERE a.patient_id = ? AND a.status = 'active' AND u.status = 'active'
+            WHERE a.patient_id = ? AND a.status = 'active'
+              AND u.role = 'doctor' AND u.status IN ('active', 'approved')
             """,
             (patient_id,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def create_patient_appointment(
+    patient_id: int,
+    doctor_id: int,
+    scheduled_at: str,
+    appointment_type: str,
+    reason: str,
+) -> tuple[bool, str, int | None]:
+    if appointment_type not in {"Video consultation", "In-person consultation"}:
+        return False, "Choose a valid consultation type.", None
+    if not reason.strip() or len(reason.strip()) > 1000:
+        return False, "Enter a visit reason of up to 1000 characters.", None
+    try:
+        scheduled = datetime.fromisoformat(scheduled_at)
+    except ValueError:
+        return False, "Choose a valid consultation date and time.", None
+    if scheduled.tzinfo is not None:
+        scheduled = scheduled.astimezone().replace(tzinfo=None)
+    if scheduled <= datetime.now():
+        return False, "Choose a future consultation time.", None
+
+    with get_connection() as conn:
+        relationship = conn.execute(
+            """
+            SELECT 1
+            FROM patient_doctor_assignments a
+            JOIN users p ON p.id = a.patient_id
+            JOIN users d ON d.id = a.doctor_id
+            WHERE a.patient_id = ? AND a.doctor_id = ? AND a.status = 'active'
+              AND p.role = 'patient' AND p.status = 'active'
+              AND d.role = 'doctor' AND d.status IN ('active', 'approved')
+            """,
+            (patient_id, doctor_id),
+        ).fetchone()
+        if not relationship:
+            return False, "An active care relationship is required to schedule with this doctor.", None
+
+        conflicts = conn.execute(
+            """
+            SELECT scheduled_at FROM patient_appointments
+            WHERE status = 'scheduled' AND (doctor_id = ? OR patient_id = ?)
+            """,
+            (doctor_id, patient_id),
+        ).fetchall()
+        if any(
+            abs((scheduled - datetime.fromisoformat(row["scheduled_at"])).total_seconds()) < 1800
+            for row in conflicts
+        ):
+            return False, "That time is no longer available. Choose another slot.", None
+
+        cursor = conn.execute(
+            """
+            INSERT INTO patient_appointments (
+                patient_id, doctor_id, scheduled_at, appointment_type, reason
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                patient_id,
+                doctor_id,
+                scheduled.isoformat(timespec="minutes"),
+                appointment_type,
+                reason.strip(),
+            ),
+        )
+        appointment_id = int(cursor.lastrowid)
+    log_audit_event(
+        user_id=patient_id,
+        action="patient_appointment_scheduled",
+        resource=f"appointment:{appointment_id}",
+        details={"doctor_id": doctor_id, "scheduled_at": scheduled.isoformat()},
+    )
+    return True, "Consultation scheduled.", appointment_id
+
+
+def get_patient_appointments(patient_id: int) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT a.id, a.scheduled_at, a.appointment_type, a.reason, a.status,
+                   a.created_at, d.username AS doctor_name, d.specialization,
+                   d.hospital, d.email AS doctor_email
+            FROM patient_appointments a
+            JOIN users d ON d.id = a.doctor_id
+            WHERE a.patient_id = ?
+            ORDER BY a.scheduled_at DESC
+            """,
+            (patient_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_doctor_appointments(doctor_id: int) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT a.id, a.scheduled_at, a.appointment_type, a.reason, a.status,
+                   a.created_at, p.username AS patient_name, p.email AS patient_email
+            FROM patient_appointments a
+            JOIN users p ON p.id = a.patient_id
+            WHERE a.doctor_id = ?
+            ORDER BY a.scheduled_at ASC
+            """,
+            (doctor_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def cancel_patient_appointment(patient_id: int, appointment_id: int) -> bool:
+    with get_connection() as conn:
+        appointment = conn.execute(
+            """
+            SELECT scheduled_at FROM patient_appointments
+            WHERE id = ? AND patient_id = ? AND status = 'scheduled'
+            """,
+            (appointment_id, patient_id),
+        ).fetchone()
+        if not appointment:
+            return False
+        if datetime.fromisoformat(appointment["scheduled_at"]) <= datetime.now():
+            return False
+        cursor = conn.execute(
+            """
+            UPDATE patient_appointments SET status = 'cancelled'
+            WHERE id = ? AND patient_id = ? AND status = 'scheduled'
+            """,
+            (appointment_id, patient_id),
+        )
+    if cursor.rowcount != 1:
+        return False
+    log_audit_event(
+        user_id=patient_id,
+        action="patient_appointment_cancelled",
+        resource=f"appointment:{appointment_id}",
+    )
+    return True
 
 
 def get_assigned_patients_for_doctor(doctor_id: int) -> list[dict]:
@@ -953,6 +1274,21 @@ def add_clinical_note(
     prediction_id: int, doctor_id: int, note_content: str, recommendation: str | None = None
 ) -> int:
     with get_connection() as conn:
+        authorized = conn.execute(
+            """
+            SELECT 1
+            FROM predictions p
+            JOIN patient_doctor_assignments a ON a.patient_id = p.user_id
+            JOIN users d ON d.id = a.doctor_id
+            JOIN users u ON u.id = p.user_id
+            WHERE p.id = ? AND a.doctor_id = ? AND a.status = 'active'
+              AND d.role = 'doctor' AND d.status IN ('active', 'approved')
+              AND u.role = 'patient' AND u.status = 'active'
+            """,
+            (prediction_id, doctor_id),
+        ).fetchone()
+        if not authorized:
+            raise PermissionError("An active, verified patient relationship is required to add a clinical note.")
         cursor = conn.execute(
             """
             INSERT INTO clinical_notes (prediction_id, doctor_id, note_content, recommendation)
@@ -997,7 +1333,10 @@ def get_doctor_assigned_predictions(doctor_id: int) -> list[dict]:
             FROM predictions p
             JOIN patient_doctor_assignments a ON p.user_id = a.patient_id
             JOIN users u ON p.user_id = u.id
+            JOIN users d ON d.id = a.doctor_id
             WHERE a.doctor_id = ? AND a.status = 'active'
+              AND u.status = 'active' AND d.role = 'doctor'
+              AND d.status IN ('active', 'approved')
             ORDER BY p.created_at DESC
             """,
             (doctor_id,),
@@ -1125,7 +1464,7 @@ def parse_patient_code(patient_code: str) -> int | None:
 
 
 def find_patient_by_identifier(identifier: str) -> dict | None:
-    """Search patient user account by Email, Phone, or Patient Code (PAT-XXXXXX)."""
+    """Search a patient by code, exact contact/name, or a partial contact/name."""
     cleaned = identifier.strip()
     parsed_id = parse_patient_code(cleaned)
     with get_connection() as conn:
@@ -1142,10 +1481,24 @@ def find_patient_by_identifier(identifier: str) -> dict | None:
         row = conn.execute(
             """
             SELECT * FROM users
-            WHERE (email = ? OR phone = ? OR username = ?) AND role = 'patient'
+            WHERE role = 'patient'
+              AND (LOWER(email) = ? OR phone = ? OR LOWER(username) = ?)
+            ORDER BY id DESC
             """,
-            (cleaned.lower(), cleaned, cleaned),
+            (cleaned.lower(), cleaned, cleaned.lower()),
         ).fetchone()
+        if not row:
+            pattern = f"%{cleaned.lower()}%"
+            row = conn.execute(
+                """
+                SELECT * FROM users
+                WHERE role = 'patient'
+                  AND (LOWER(email) LIKE ? OR phone LIKE ? OR LOWER(username) LIKE ?)
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (pattern, pattern, pattern),
+            ).fetchone()
 
     if row:
         res = dict(row)
@@ -1154,7 +1507,101 @@ def find_patient_by_identifier(identifier: str) -> dict | None:
     return None
 
 
-def create_doctor_added_patient(
+def _create_patient_invitation(
+    conn,
+    patient_id: int,
+    doctor_id: int,
+    relationship_role: str,
+    institution: str | None,
+    consent_note: str | None,
+) -> str:
+    import secrets
+
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=7)
+    conn.execute(
+        """
+        UPDATE patient_invitations SET status = 'revoked', responded_at = CURRENT_TIMESTAMP
+        WHERE patient_id = ? AND doctor_id = ? AND status = 'pending'
+        """,
+        (patient_id, doctor_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO patient_doctor_assignments (patient_id, doctor_id, status, created_by)
+        VALUES (?, ?, 'pending_consent', 'doctor')
+        ON CONFLICT(patient_id, doctor_id) DO UPDATE SET status = 'pending_consent'
+        """,
+        (patient_id, doctor_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO patient_invitations (
+            patient_id, doctor_id, token_hash, relationship_role,
+            institution, consent_note, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            patient_id,
+            doctor_id,
+            token_hash,
+            relationship_role.strip(),
+            institution.strip() if institution else None,
+            consent_note.strip() if consent_note else None,
+            expires_at.strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+    )
+    return token
+
+
+def create_patient_relationship_invitation(
+    doctor_id: int,
+    patient_id: int,
+    relationship_role: str = "Primary doctor",
+    institution: str | None = None,
+    consent_note: str | None = None,
+) -> tuple[bool, str, str | None]:
+    """Create a time-limited invitation; access remains blocked until patient accepts."""
+    if not relationship_role.strip():
+        return False, "Relationship role is required.", None
+    with get_connection() as conn:
+        patient = conn.execute(
+            "SELECT id, role, status FROM users WHERE id = ?", (patient_id,)
+        ).fetchone()
+        doctor = conn.execute(
+            "SELECT id, role, status FROM users WHERE id = ?", (doctor_id,)
+        ).fetchone()
+        if not patient or patient["role"] != "patient" or patient["status"] != "active":
+            return False, "Patient account not found.", None
+        if (
+            not doctor
+            or doctor["role"] != "doctor"
+            or doctor["status"] not in ("active", "approved")
+        ):
+            return False, "An active, verified doctor account is required.", None
+        assignment = conn.execute(
+            """
+            SELECT status FROM patient_doctor_assignments
+            WHERE patient_id = ? AND doctor_id = ?
+            """,
+            (patient_id, doctor_id),
+        ).fetchone()
+        if assignment and assignment["status"] == "active":
+            return False, "This patient relationship is already active.", None
+        token = _create_patient_invitation(
+            conn, patient_id, doctor_id, relationship_role, institution, consent_note
+        )
+    log_audit_event(
+        user_id=doctor_id,
+        action="patient_relationship_invitation_created",
+        resource=f"user:{patient_id}",
+        details={"relationship_role": relationship_role},
+    )
+    return True, "Invitation created. The patient must accept before access is enabled.", token
+
+
+def create_doctor_added_patient_invitation(
     doctor_id: int,
     full_name: str,
     email: str,
@@ -1163,37 +1610,147 @@ def create_doctor_added_patient(
     gender: str | None = None,
     address: str | None = None,
     medical_notes: str | None = None,
-    hashed_password: str | None = None,
-) -> tuple[bool, str, int | None]:
-    """Create a new patient user account, patient record, and active doctor assignment."""
-    dup = check_duplicate(full_name, email, phone)
-    if dup:
-        return False, f"A user with that {dup} already exists.", None
-
+    relationship_role: str = "Primary doctor",
+    institution: str | None = None,
+    consent_note: str | None = None,
+) -> tuple[bool, str, int | None, str | None]:
+    """Create a patient and invitation atomically without granting scan access."""
+    import bcrypt
     import secrets
-    fallback_hash = hashed_password or secrets.token_hex(16)
 
-    patient_id = create_user_with_role(
-        username=full_name.strip(),
-        email=email.strip().lower(),
-        phone=phone.strip(),
-        hashed_password=fallback_hash,
-        role="patient",
-        status="active",
-        address=address,
-    )
-
-    if not patient_id:
-        return False, "Failed to create patient user account.", None
+    full_name = full_name.strip()
+    email = email.strip().lower()
+    phone = phone.strip()
+    if not full_name or not email or not phone:
+        return False, "Full name, email and phone are required.", None, None
+    if not relationship_role.strip():
+        return False, "Relationship role is required.", None, None
 
     with get_connection() as conn:
+        doctor = conn.execute(
+            """
+            SELECT 1 FROM users
+            WHERE id = ? AND role = 'doctor' AND status IN ('active', 'approved')
+            """,
+            (doctor_id,),
+        ).fetchone()
+        if not doctor:
+            return False, "An active, verified doctor account is required.", None, None
+        duplicate = conn.execute(
+            """
+            SELECT username, email, phone FROM users
+            WHERE username = ? OR email = ? OR phone = ?
+            """,
+            (full_name, email, phone),
+        ).fetchone()
+        if duplicate:
+            if duplicate["username"] == full_name:
+                field = "name"
+            elif duplicate["email"] == email:
+                field = "email"
+            else:
+                field = "phone"
+            return False, f"A user with that {field} already exists.", None, None
+
+        placeholder_hash = bcrypt.hashpw(
+            secrets.token_bytes(32), bcrypt.gensalt()
+        ).decode("utf-8")
+        cursor = conn.execute(
+            """
+            INSERT INTO users (username, email, phone, password, role, status, address, is_verified)
+            VALUES (?, ?, ?, ?, 'patient', 'active', ?, 0)
+            """,
+            (full_name, email, phone, placeholder_hash, address),
+        )
+        patient_id = int(cursor.lastrowid)
         conn.execute(
             """
             INSERT INTO patient_records (
                 user_id, patient_name, patient_gender, dob, address, notes, created_by_doctor_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (patient_id, full_name.strip(), gender, dob, address, medical_notes, doctor_id),
+            (patient_id, full_name, gender, dob, address, medical_notes, doctor_id),
+        )
+        token = _create_patient_invitation(
+            conn, patient_id, doctor_id, relationship_role, institution, consent_note
+        )
+
+    log_audit_event(
+        user_id=doctor_id,
+        action="doctor_created_patient_invitation",
+        resource=f"user:{patient_id}",
+        details={"patient_code": get_patient_code(patient_id)},
+    )
+    return (
+        True,
+        f"Patient account created. Invitation sent for {full_name}; access starts only after acceptance.",
+        patient_id,
+        token,
+    )
+
+
+def create_doctor_added_patient_account(
+    doctor_id: int,
+    full_name: str,
+    email: str,
+    phone: str,
+    dob: str | None = None,
+    gender: str | None = None,
+    address: str | None = None,
+    medical_notes: str | None = None,
+) -> tuple[bool, str, int | None, str | None]:
+    """Create an active patient account and doctor assignment with a temporary password."""
+    import bcrypt
+    import secrets
+
+    full_name = full_name.strip()
+    email = email.strip().lower()
+    phone = phone.strip()
+    if not full_name or not email or not phone:
+        return False, "Full name, email and phone are required.", None, None
+
+    temporary_password = f"Neuro@{secrets.token_urlsafe(8)}"
+    with get_connection() as conn:
+        doctor = conn.execute(
+            """
+            SELECT id FROM users
+            WHERE id = ? AND role = 'doctor' AND status IN ('active', 'approved')
+            """,
+            (doctor_id,),
+        ).fetchone()
+        if not doctor:
+            return False, "An active, verified doctor account is required.", None, None
+        duplicate = conn.execute(
+            "SELECT username, email, phone FROM users WHERE username = ? OR email = ? OR phone = ?",
+            (full_name, email, phone),
+        ).fetchone()
+        if duplicate:
+            field = "name" if duplicate["username"] == full_name else (
+                "email" if duplicate["email"] == email else "phone"
+            )
+            return False, f"A user with that {field} already exists.", None, None
+
+        cursor = conn.execute(
+            """
+            INSERT INTO users (username, email, phone, password, role, status, address, is_verified)
+            VALUES (?, ?, ?, ?, 'patient', 'active', ?, 1)
+            """,
+            (
+                full_name,
+                email,
+                phone,
+                bcrypt.hashpw(temporary_password.encode(), bcrypt.gensalt()).decode(),
+                address,
+            ),
+        )
+        patient_id = int(cursor.lastrowid)
+        conn.execute(
+            """
+            INSERT INTO patient_records (
+                user_id, patient_name, patient_gender, dob, address, notes, created_by_doctor_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (patient_id, full_name, gender, dob, address, medical_notes, doctor_id),
         )
         conn.execute(
             """
@@ -1206,11 +1763,145 @@ def create_doctor_added_patient(
 
     log_audit_event(
         user_id=doctor_id,
-        action="doctor_added_patient",
+        action="doctor_created_patient_account",
         resource=f"user:{patient_id}",
-        details={"patient_code": get_patient_code(patient_id), "patient_name": full_name},
+        details={"patient_code": get_patient_code(patient_id)},
     )
-    return True, f"Patient {full_name} created successfully! Patient Code: {get_patient_code(patient_id)}", patient_id
+    return True, "Patient account created and assigned for immediate scanning.", patient_id, temporary_password
+
+
+def get_patient_invitation(token: str) -> dict | None:
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT i.*, p.username AS patient_name, p.email AS patient_email,
+                   p.phone AS patient_phone, p.is_verified AS patient_phone_verified,
+                   d.username AS doctor_name, d.specialization AS doctor_specialization,
+                   d.hospital AS doctor_hospital
+            FROM patient_invitations i
+            JOIN users p ON p.id = i.patient_id
+            JOIN users d ON d.id = i.doctor_id
+            WHERE i.token_hash = ?
+            """,
+            (token_hash,),
+        ).fetchone()
+        if not row:
+            return None
+        invitation = dict(row)
+        expires_at = invitation["expires_at"]
+        if isinstance(expires_at, str):
+            expires_at = datetime.fromisoformat(expires_at)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if invitation["status"] == "pending" and expires_at <= datetime.now(timezone.utc):
+            conn.execute(
+                "UPDATE patient_invitations SET status = 'expired' WHERE id = ?",
+                (invitation["id"],),
+            )
+            conn.execute(
+                """
+                UPDATE patient_doctor_assignments SET status = 'invitation_expired'
+                WHERE patient_id = ? AND doctor_id = ? AND status = 'pending_consent'
+                """,
+                (invitation["patient_id"], invitation["doctor_id"]),
+            )
+            invitation["status"] = "expired"
+        return invitation
+
+
+def get_doctor_pending_invitations(doctor_id: int) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT i.id, i.patient_id, i.relationship_role, i.institution,
+                   i.status, i.created_at, i.expires_at, u.username AS patient_name,
+                   u.email AS patient_email
+            FROM patient_invitations i
+            JOIN users u ON u.id = i.patient_id
+            WHERE i.doctor_id = ? AND i.status = 'pending'
+              AND i.expires_at > CURRENT_TIMESTAMP
+            ORDER BY i.created_at DESC
+            """,
+            (doctor_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def respond_to_patient_invitation(
+    token: str, patient_id: int, accept: bool
+) -> tuple[bool, str]:
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    new_status = "accepted" if accept else "declined"
+    assignment_status = "active" if accept else "declined"
+    with get_connection() as conn:
+        invitation = conn.execute(
+            """
+            SELECT i.id, i.doctor_id, i.patient_id,
+                   p.role AS patient_role, p.status AS patient_status,
+                   p.is_verified AS patient_phone_verified
+            FROM patient_invitations i
+            JOIN users p ON p.id = i.patient_id
+            WHERE i.token_hash = ? AND i.patient_id = ? AND i.status = 'pending'
+              AND i.expires_at > CURRENT_TIMESTAMP
+            """,
+            (token_hash, patient_id),
+        ).fetchone()
+        if not invitation:
+            return False, "This invitation is invalid, expired or already used."
+        if invitation["patient_role"] != "patient" or invitation["patient_status"] != "active":
+            return False, "This patient account is not active."
+        conn.execute(
+            """
+            UPDATE patient_invitations
+            SET status = ?, responded_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status = 'pending'
+            """,
+            (new_status, invitation["id"]),
+        )
+        conn.execute(
+            """
+            UPDATE patient_doctor_assignments SET status = ?
+            WHERE patient_id = ? AND doctor_id = ? AND status = 'pending_consent'
+            """,
+            (assignment_status, patient_id, invitation["doctor_id"]),
+        )
+    log_audit_event(
+        user_id=patient_id,
+        action=f"patient_relationship_invitation_{new_status}",
+        resource=f"doctor:{invitation['doctor_id']}",
+    )
+    return True, "Relationship accepted. Doctor workspace access is now enabled." if accept else "Invitation declined."
+
+
+def revoke_patient_invitation(token: str, doctor_id: int) -> bool:
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    with get_connection() as conn:
+        invitation = conn.execute(
+            """
+            SELECT patient_id FROM patient_invitations
+            WHERE token_hash = ? AND doctor_id = ? AND status = 'pending'
+            """,
+            (token_hash, doctor_id),
+        ).fetchone()
+        if not invitation:
+            return False
+        conn.execute(
+            """
+            UPDATE patient_invitations
+            SET status = 'revoked', responded_at = CURRENT_TIMESTAMP
+            WHERE token_hash = ? AND doctor_id = ? AND status = 'pending'
+            """,
+            (token_hash, doctor_id),
+        )
+        conn.execute(
+            """
+            UPDATE patient_doctor_assignments SET status = 'invitation_revoked'
+            WHERE patient_id = ? AND doctor_id = ? AND status = 'pending_consent'
+            """,
+            (invitation["patient_id"], doctor_id),
+        )
+    return True
 
 
 def get_doctor_assigned_patients_with_details(doctor_id: int) -> list[dict]:
@@ -1223,7 +1914,9 @@ def get_doctor_assigned_patients_with_details(doctor_id: int) -> list[dict]:
                    a.assigned_at, a.status AS relationship_status
             FROM patient_doctor_assignments a
             JOIN users u ON a.patient_id = u.id
-            LEFT JOIN patient_records r ON u.id = r.user_id
+            LEFT JOIN patient_records r ON r.id = (
+                SELECT MAX(r2.id) FROM patient_records r2 WHERE r2.user_id = u.id
+            )
             WHERE a.doctor_id = ? AND a.status = 'active' AND u.status = 'active'
             ORDER BY u.username ASC
             """,
