@@ -6,6 +6,7 @@ import base64
 import html
 import io
 import json
+import logging
 import os
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -50,7 +51,11 @@ from authentication import (
     verify_password,
 )
 from backend import analyze_uploaded_scan
-from chatbot import SUGGESTED_QUESTIONS, get_response_dict as mastishka_response_dict
+from chatbot import (
+    SUGGESTED_QUESTIONS,
+    get_llm_client,
+    get_response_dict as mastishka_response_dict,
+)
 from database import (
     create_patient_record,
     create_doctor_added_patient_account,
@@ -98,7 +103,12 @@ from frontend import (
 )
 from model import CLASS_INFO
 from preprocessing import is_probable_brain_mri, load_image_from_upload, plot_pixel_histogram, plot_preprocessing_steps, preprocess_array, validate_image
-from reports import generate_pdf_report
+from reports import (
+    generate_online_ai_report,
+    generate_pdf_report,
+    is_online_ai_report_configured,
+)
+from utils.web_search import is_web_search_available
 
 
 matplotlib.use("Agg")
@@ -112,6 +122,67 @@ st.set_page_config(
 )
 inject_theme()
 initialize_database()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_online_ai_report(
+    prediction: str,
+    confidence: float,
+    probabilities_json: str,
+    base_summary: str,
+) -> dict:
+    """Cache source-grounded summaries by non-identifying model output only."""
+    return generate_online_ai_report(
+        prediction,
+        confidence,
+        json.loads(probabilities_json),
+        base_summary,
+    )
+
+
+def _report_ai_fields(
+    prediction: str,
+    confidence: float,
+    probabilities: dict[str, float],
+    base_summary: str | None,
+) -> dict:
+    """Use online research when configured, otherwise disclose the local-only report."""
+    summary = base_summary or "No model-generated summary is available."
+    if not is_online_ai_report_configured():
+        return {
+            "summary": summary,
+            "sources": [],
+            "status": (
+                "Online AI research is not configured; this report contains the local "
+                "model summary only."
+            ),
+        }
+    try:
+        with st.spinner("Searching trusted medical sources and preparing the AI report..."):
+            result = _cached_online_ai_report(
+                prediction,
+                confidence,
+                json.dumps(probabilities, sort_keys=True),
+                summary,
+            )
+    except RuntimeError:
+        logging.getLogger(__name__).exception("Online AI report generation failed.")
+        return {
+            "summary": summary,
+            "sources": [],
+            "status": (
+                "Online AI research could not be completed; this report contains the "
+                "local model summary only. Check provider configuration and application logs."
+            ),
+        }
+    return {
+        "summary": result["summary"],
+        "sources": result["sources"],
+        "status": (
+            "Educational context generated from online medical sources; not a diagnosis "
+            "or a substitute for clinical interpretation."
+        ),
+    }
 
 _BRAIN_ICON_SVG = (
     '<svg viewBox="0 0 24 24" aria-hidden="true">'
@@ -1472,6 +1543,12 @@ def page_upload() -> None:
         for note in patient_notes
         if note.get("recommendation")
     ] or ["No clinician recommendation has been recorded for this scan."]
+    report_ai = _report_ai_fields(
+        result["class"],
+        float(result["confidence"]),
+        result["probabilities"],
+        result.get("ai_summary"),
+    )
     pdf_bytes = generate_pdf_report(
         username=current_username(),
         scan_date=datetime.now().strftime("%d %B %Y %H:%M:%S"),
@@ -1486,7 +1563,9 @@ def page_upload() -> None:
         recommendations=patient_recommendations,
         clinical_notes=patient_notes,
         scan_id=prediction_id,
-        ai_summary=result["ai_summary"],
+        ai_summary=report_ai["summary"],
+        ai_sources=report_ai["sources"],
+        research_status=report_ai["status"],
         model_name=result["model_name"],
         quality_label=result["quality"]["label"],
     )
@@ -1839,6 +1918,12 @@ def _patient_report_bytes(record: dict, user: dict) -> bytes:
         "Pituitary": float(record.get("pituitary_prob") or 0),
         "Normal": float(record.get("normal_prob") or 0),
     }
+    report_ai = _report_ai_fields(
+        prediction,
+        float(record.get("confidence") or 0),
+        probabilities,
+        record.get("ai_summary"),
+    )
     return generate_pdf_report(
         username=_patient_display_name(user),
         scan_date=str(record.get("created_at") or "Date unavailable"),
@@ -1851,7 +1936,9 @@ def _patient_report_bytes(record: dict, user: dict) -> bytes:
         probabilities=probabilities,
         class_info={**CLASS_INFO[prediction], "severity": record.get("severity") or "Not assessed"},
         scan_id=int(record["id"]),
-        ai_summary=record.get("ai_summary"),
+        ai_summary=report_ai["summary"],
+        ai_sources=report_ai["sources"],
+        research_status=report_ai["status"],
         recommendations=[
             "Discuss this AI-generated result with a qualified clinician and correlate it with the full MRI series and clinical context."
         ],
@@ -2463,6 +2550,21 @@ def page_mastishka() -> None:
         ],
     )
 
+    allow_online = st.checkbox(
+        "Use online AI and medical web search for answers",
+        key=f"mastishka_online_consent_{chat_context_id}",
+        help=(
+            "When enabled, your text question and recent chat context are sent to the "
+            "configured AI/search providers. Detected patient IDs, email addresses, and "
+            "phone numbers are removed. Do not include identifying or sensitive details."
+        ),
+    )
+    if allow_online:
+        if not get_llm_client().is_available():
+            st.warning("Online AI is not configured. Configure LLM_PROVIDER and LLM_API_KEY to enable it.")
+        elif not is_web_search_available():
+            st.info("Online AI is enabled, but live web citations require a TAVILY_API_KEY.")
+
     quick_pick = None
     user_message = None
     send_message = False
@@ -2586,6 +2688,7 @@ def page_mastishka() -> None:
                 if workspace_layout
                 else st.session_state.get("last_scan_result")
             ),
+            allow_online=allow_online,
         )
 
         reply_text = res_dict["answer"]
@@ -2909,6 +3012,12 @@ def _render_doctor_scan_review(
         for note in existing_notes
         if note.get("recommendation")
     ] or ["No clinician recommendation has been recorded for this scan."]
+    report_ai = _report_ai_fields(
+        result["class"],
+        float(result["confidence"]),
+        result["probabilities"],
+        result.get("ai_summary"),
+    )
     pdf_bytes = generate_pdf_report(
         username=target_patient["username"],
         scan_date=str(created_at or datetime.now().strftime("%d %B %Y %H:%M:%S")),
@@ -2923,7 +3032,9 @@ def _render_doctor_scan_review(
         recommendations=clinician_recommendations,
         clinical_notes=existing_notes,
         scan_id=prediction_id,
-        ai_summary=result.get("ai_summary"),
+        ai_summary=report_ai["summary"],
+        ai_sources=report_ai["sources"],
+        research_status=report_ai["status"],
         model_name=result.get("model_name"),
         quality_label=result["quality"]["label"],
     )
@@ -3296,6 +3407,12 @@ def page_doctor_dashboard() -> None:
                             for note in notes
                             if note.get("recommendation")
                         ] or ["No clinician recommendation has been recorded for this scan."]
+                        report_ai = _report_ai_fields(
+                            prediction,
+                            confidence,
+                            probabilities,
+                            summary_text,
+                        )
                         pdf = generate_pdf_report(
                             username=selected["full_name"],
                             scan_date=str(record.get("created_at") or ""),
@@ -3315,7 +3432,9 @@ def page_doctor_dashboard() -> None:
                             recommendations=pdf_recommendations,
                             clinical_notes=notes,
                             scan_id=selected_scan["id"],
-                            ai_summary=summary_text,
+                            ai_summary=report_ai["summary"],
+                            ai_sources=report_ai["sources"],
+                            research_status=report_ai["status"],
                             model_name=model_name,
                             quality_label=quality_label,
                         )
@@ -4277,6 +4396,12 @@ def page_doctor_reports() -> None:
                     "Pituitary": float(record.get("pituitary_prob") or 0),
                     "Normal": float(record.get("normal_prob") or 0),
                 }
+                report_ai = _report_ai_fields(
+                    record["prediction"],
+                    float(record["confidence"]),
+                    probabilities,
+                    record.get("ai_summary"),
+                )
                 pdf_bytes = generate_pdf_report(
                     username=report_summary["patient_username"],
                     scan_date=str(record.get("created_at") or ""),
@@ -4294,7 +4419,9 @@ def page_doctor_reports() -> None:
                     ] or ["No clinician recommendation has been recorded for this scan."],
                     clinical_notes=notes,
                     scan_id=record["id"],
-                    ai_summary=record.get("ai_summary"),
+                    ai_summary=report_ai["summary"],
+                    ai_sources=report_ai["sources"],
+                    research_status=report_ai["status"],
                     model_name=record.get("model_name"),
                     quality_label=record.get("quality_label"),
                 )

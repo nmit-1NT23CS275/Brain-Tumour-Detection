@@ -24,6 +24,7 @@
 - **Hybrid RAG Retriever (`retriever.py`)**: Combines 50% keyword overlap (with synonym expansion for terms like *tumour*, *mri*, *head pain*, *cure*) and 50% TF-IDF cosine similarity (word 1–2 n-grams + char_wb 3–4 n-grams) over NCI/NINDS knowledge base CSVs.
 - **Patient Privacy & PII Sanitization (`llm_client.py`)**: Automatically strips patient codes (`PAT-XXXXXX`), email addresses, and phone numbers before sending prompts to external LLM providers.
 - **Medical Safety Protocols**: Immediate emergency keyword interception (redirecting crisis queries to urgent medical care), self-diagnosis safeguards ("do I have a tumor?"), and mandatory medical disclaimers for Treatment, Prognosis, Symptoms, Medical Guidance, and Risk Factors.
+- **Optional online AI and cited research**: Mastishka can send opted-in questions to the configured cloud LLM and search trusted medical websites through Tavily. PDF reports can add an AI-written educational context section with source links; model output is not treated as a clinical finding.
 - **Offline Fallback & Citation**: Runs seamlessly offline using local knowledge base retrieval when no LLM API key is present. Automatically cites authoritative sources (*Sources: NCI, NINDS*) and supports dynamic scan result explanations.
 
 ### 3. 👨‍⚕️ Mandatory Doctor Credential Upload & Admin Verification
@@ -168,6 +169,9 @@ Copy `.env.example` to `.env` to configure environment variables:
 | `LLM_MODEL` | `""` | Model identifier (e.g., `gemini-1.5-flash`, `gpt-3.5-turbo`, `claude-3-haiku-20240307`, `llama3`). |
 | `LLM_TIMEOUT` | `20` | Maximum request timeout in seconds for LLM calls. |
 | `RETRIEVAL_THRESHOLD` | `0.25` | Minimum hybrid confidence score threshold required for knowledge retrieval. |
+| `TAVILY_API_KEY` | `""` | Tavily Search API key for trusted medical web results and report citations. |
+
+Set `LLM_PROVIDER` and `LLM_API_KEY` for cloud-generated answers and reports, and set `TAVILY_API_KEY` to enable live web search and citations. Chat users must opt in to online processing in Mastishka. Report research sends only the model class, confidence, class probabilities, and existing summary; MRI images and patient identifiers are not sent to search. Cloud providers process data according to their own terms, so do not enter identifying or sensitive information. Without these settings, reports disclose that they use the local model summary and Mastishka retains its offline knowledge-base mode.
 
 ---
 

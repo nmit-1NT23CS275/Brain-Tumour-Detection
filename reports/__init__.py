@@ -1,1 +1,2 @@
 from .pdf_report import generate_pdf_report
+from .ai_report import generate_online_ai_report, is_online_ai_report_configured

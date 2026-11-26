@@ -80,6 +80,8 @@ def generate_pdf_report(
     model_name: str | None = None,
     quality_label: str | None = None,
     clinical_notes: list[dict] | None = None,
+    ai_sources: list[dict[str, str]] | None = None,
+    research_status: str | None = None,
 ) -> bytes:
     """Generate an expanded PDF report with images and AI interpretation."""
     styles = _styles()
@@ -120,10 +122,23 @@ def generate_pdf_report(
     story.extend([_table(prob_rows, [7 * cm, 9.5 * cm]), Spacer(1, 0.35 * cm)])
 
     story.append(Paragraph("Clinical Interpretation", styles["section"]))
-    story.append(Paragraph(class_info.get("description", ""), styles["body"]))
+    description = escape(str(class_info.get("description", ""))).replace("\n", "<br/>")
+    story.append(Paragraph(description, styles["body"]))
     if ai_summary:
         story.append(Spacer(1, 0.15 * cm))
-        story.append(Paragraph(ai_summary, styles["body"]))
+        safe_summary = escape(str(ai_summary)).replace("\n", "<br/>")
+        story.append(Paragraph(safe_summary, styles["body"]))
+    if research_status:
+        story.append(Spacer(1, 0.1 * cm))
+        story.append(Paragraph(escape(research_status), styles["small"]))
+    if ai_sources:
+        story.append(Spacer(1, 0.15 * cm))
+        story.append(Paragraph("Online sources", styles["section"]))
+        for source in ai_sources:
+            title = escape(str(source.get("title") or "Source"))
+            url = escape(str(source.get("url") or ""))
+            if url:
+                story.append(Paragraph(f"<b>{title}</b><br/>{url}", styles["small"]))
     story.append(Spacer(1, 0.3 * cm))
 
     if clinical_notes:
@@ -156,7 +171,7 @@ def generate_pdf_report(
 
     story.append(Paragraph("Recommendations", styles["section"]))
     for rec in recommendations or _default_recommendations(prediction):
-        story.append(Paragraph(f"• {rec}", styles["body"]))
+        story.append(Paragraph(escape(str(rec)).replace("\n", "<br/>"), styles["body"]))
     story.extend([Spacer(1, 0.25 * cm), HRFlowable(width="100%", thickness=1, color=GREY), Spacer(1, 0.2 * cm)])
     story.append(
         Paragraph(

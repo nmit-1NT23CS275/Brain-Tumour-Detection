@@ -16,6 +16,12 @@ def test_pdf_report_includes_clinician_notes_with_untrusted_text():
         probabilities={"Glioma": 0.1, "Meningioma": 0.8, "Pituitary": 0.05, "Normal": 0.05},
         class_info={"description": "Model output for clinician review.", "severity": "Review"},
         scan_id=1,
+        ai_summary="Online context <tag> & clinician review.",
+        ai_sources=[{
+            "title": "Brain tumor information",
+            "url": "https://www.cancer.gov/about-cancer/brain-tumors",
+        }],
+        research_status="Online sources used; educational only.",
         recommendations=["No clinician recommendation has been recorded."],
         clinical_notes=[
             {

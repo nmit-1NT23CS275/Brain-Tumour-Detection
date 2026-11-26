@@ -139,6 +139,48 @@ def test_llm_path_mocked_with_pii_sanitization():
         assert "[PATIENT_ID_REDACTED]" in sent_content or "[EMAIL_REDACTED]" in sent_content
 
 
+def test_online_ai_answers_low_retrieval_queries_with_web_sources():
+    """Configured online AI should answer beyond local retrieval and cite search results."""
+    mock_client = MagicMock()
+    mock_client.is_available.return_value = True
+    mock_client.generate.return_value = "General educational information [1]."
+    sources = [{
+        "title": "Brain tumor information",
+        "url": "https://www.cancer.gov/about-cancer/brain-tumors",
+        "content": "General information from NCI.",
+    }]
+
+    with (
+        patch("chatbot.mastishka.get_llm_client", return_value=mock_client),
+        patch("chatbot.mastishka.is_web_search_available", return_value=True),
+        patch("chatbot.mastishka.search_web", return_value=sources),
+    ):
+        response = get_response_dict(
+            "What are some recent advances in brain tumor research?",
+            threshold=1.1,
+        )
+
+    assert mock_client.generate.called
+    system_prompt = mock_client.generate.call_args.args[0]
+    assert "WEB SEARCH RESULTS" in system_prompt
+    assert "recent advances" in mock_client.generate.call_args.args[1][-1]["content"]
+    assert "[Brain tumor information](https://www.cancer.gov/about-cancer/brain-tumors)" in response["answer"]
+    assert "Disclaimer:" in response["answer"]
+    assert response["intent"] == "online_ai"
+
+
+def test_online_ai_can_be_disabled_by_user_consent_setting():
+    """The UI's opt-in setting prevents cloud calls while retaining offline retrieval."""
+    mock_client = MagicMock()
+    mock_client.is_available.return_value = True
+
+    with patch("chatbot.mastishka.get_llm_client", return_value=mock_client):
+        response = get_response_dict("What is a glioma?", allow_online=False)
+
+    mock_client.generate.assert_not_called()
+    assert response["intent"] == "glioma_definition"
+
+
 def test_fallback_path_without_api_key():
     """Verify that when no LLM API key is configured, the bot still answers seamlessly from CSV retrieval."""
     with patch.object(LLMClient, "is_available", return_value=False):
