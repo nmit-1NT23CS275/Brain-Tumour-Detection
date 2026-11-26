@@ -101,7 +101,7 @@ from frontend import (
     inject_patient_workspace_theme,
     inject_theme,
 )
-from model import CLASS_INFO
+from model import CLASS_INFO, is_model_available
 from preprocessing import is_probable_brain_mri, load_image_from_upload, plot_pixel_histogram, plot_preprocessing_steps, preprocess_array, validate_image
 from reports import (
     generate_online_ai_report,
@@ -1406,6 +1406,13 @@ def page_upload() -> None:
         st.warning("Please log in to upload an MRI scan.")
         return
 
+    model_available = is_model_available()
+    if not model_available:
+        st.warning(
+            "MRI predictions are disabled because the trained model file is not available. "
+            "Install models/exports/best_model.keras to enable scan analysis."
+        )
+
     patient_layout = is_patient()
     if patient_layout:
         _patient_workspace_header(
@@ -1445,7 +1452,7 @@ def page_upload() -> None:
                 "Analyze MRI",
                 type="primary",
                 use_container_width=True,
-                disabled=uploaded_file is None,
+                disabled=uploaded_file is None or not model_available,
             )
 
     with right:
@@ -3180,6 +3187,11 @@ def page_doctor_dashboard() -> None:
     if selected:
         patient_scans = get_user_predictions(selected["id"], limit=100)
         with st.container(border=True):
+            model_available = is_model_available()
+            if not model_available:
+                st.warning(
+                    "MRI predictions are disabled because the trained model file is not available."
+                )
             upload_info, uploader, upload_action = st.columns([2.4, 3.2, 1.2])
             upload_info.markdown(f"**Upload MRI for {html.escape(selected['full_name'])}**")
             upload_info.caption("JPG or PNG · up to 10 MB")
@@ -3194,7 +3206,7 @@ def page_doctor_dashboard() -> None:
                 type="primary",
                 key=f"dashboard_analyze_{selected['id']}",
                 use_container_width=True,
-                disabled=uploaded_file is None,
+                disabled=uploaded_file is None or not model_available,
             ):
                 allowed, message = can_doctor_scan_patient(doctor_id, selected["id"])
                 if not allowed:
@@ -4130,6 +4142,9 @@ def page_doctor_scan_patient() -> None:
         "Review the scan. Add the clinical context.",
         "Select an assigned patient, inspect the analysis and document your independent assessment.",
     )
+    model_available = is_model_available()
+    if not model_available:
+        st.warning("MRI predictions are disabled because the trained model file is not available.")
     patients = get_doctor_assigned_patients_with_details(doctor_id)
     if not patients:
         with st.container(border=True):
@@ -4173,7 +4188,12 @@ def page_doctor_scan_patient() -> None:
             type=["png", "jpg", "jpeg"],
             key=f"doctor_scan_uploader_{patient_id}",
         )
-        if uploaded_file is not None and st.button("Analyze scan and save to record", key=f"doctor_run_scan_{patient_id}", type="primary"):
+        if uploaded_file is not None and st.button(
+            "Analyze scan and save to record",
+            key=f"doctor_run_scan_{patient_id}",
+            type="primary",
+            disabled=not model_available,
+        ):
             with st.spinner("Analyzing MRI..."):
                 result = analyze_uploaded_scan(uploaded_file)
             prediction_id = _save_scan_result(result, uploaded_file, target_user_id=patient_id, doctor_id=doctor_id)

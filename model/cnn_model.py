@@ -61,8 +61,13 @@ def build_transfer_model_vgg16():
     return build_transfer_model("VGG16")
 
 
+def is_model_available() -> bool:
+    """Return whether a trained classifier artifact is available for inference."""
+    return Path(MODEL_PATH).is_file()
+
+
 def load_model():
-    """Load the best exported model, falling back to VGG16 if absent."""
+    """Load the exported trained classifier required for MRI inference."""
     global _CACHED_MODEL, CLASS_NAMES, NUM_CLASSES
     if _CACHED_MODEL is not None:
         return _CACHED_MODEL
@@ -70,22 +75,23 @@ def load_model():
     CLASS_NAMES = load_class_names_json(CLASS_NAMES_PATH)
     NUM_CLASSES = len(CLASS_NAMES)
 
+    model_path = Path(MODEL_PATH)
+    if not model_path.is_file():
+        raise FileNotFoundError(
+            "The trained MRI classifier is unavailable. Add "
+            "models/exports/best_model.keras before enabling scan predictions."
+        )
+
     try:
         import tensorflow as tf
 
-        model_path = Path(MODEL_PATH)
-        if model_path.exists():
-            LOGGER.info("Loading model from %s", model_path)
-            _CACHED_MODEL = tf.keras.models.load_model(model_path)
-        else:
-            LOGGER.warning("Best exported model not found. Falling back to untrained VGG16 transfer model.")
-            _CACHED_MODEL = build_transfer_model("VGG16")
-    except Exception as e:
-        LOGGER.warning("TensorFlow import/load failed (%s). Falling back to mock model wrapper.", e)
-        class DummyModel:
-            def predict(self, x, verbose=0):
-                return np.array([[0.7, 0.1, 0.1, 0.1]])
-        _CACHED_MODEL = DummyModel()
+        LOGGER.info("Loading model from %s", model_path)
+        _CACHED_MODEL = tf.keras.models.load_model(model_path)
+    except Exception as exc:
+        LOGGER.exception("Failed to load trained MRI model from %s", model_path)
+        raise RuntimeError(
+            "The trained MRI classifier could not be loaded. Check the model artifact and server logs."
+        ) from exc
 
     return _CACHED_MODEL
 
@@ -100,8 +106,8 @@ def get_model_metadata() -> dict:
         _CACHED_METADATA = json.loads(MODEL_METADATA_PATH.read_text(encoding="utf-8"))
     else:
         _CACHED_METADATA = {
-            "model_name": "VGG16",
-            "model_version": "fallback",
+            "model_name": "Unavailable",
+            "model_version": "missing",
             "model_path": MODEL_PATH,
         }
     return _CACHED_METADATA

@@ -5,6 +5,7 @@ import numpy as np
 from PIL import Image
 
 from authentication.auth import hash_password, verify_password, validate_password
+from model import cnn_model
 from model.cnn_model import CLASS_NAMES, predict
 from preprocessing.image_processing import preprocess_array
 
@@ -24,8 +25,24 @@ def test_preprocessing_pipeline_on_sample_image():
     assert processed["quality"]["label"] in {"Good", "Fair", "Poor"}
 
 
-def test_predict_returns_valid_class_and_confidence():
+def test_predict_returns_valid_class_and_confidence(monkeypatch):
     """Verify predict() returns one of the 4 valid class labels with confidence in [0, 1]."""
+    class StubModel:
+        def predict(self, model_input, verbose=0):
+            return np.array([[0.1, 0.2, 0.6, 0.1]])
+
+    monkeypatch.setattr(cnn_model, "load_model", lambda: StubModel())
+    monkeypatch.setattr(
+        cnn_model,
+        "get_model_metadata",
+        lambda: {"model_name": "VGG16", "model_version": "test"},
+    )
+    monkeypatch.setattr(
+        cnn_model,
+        "get_backbone_and_preprocess",
+        lambda _: (None, lambda model_input: model_input),
+    )
+
     image_path = Path(__file__).parent.parent / "test_images" / "glioma.jpg"
     pil_img = Image.open(image_path).convert("RGB")
     processed = preprocess_array(np.array(pil_img))

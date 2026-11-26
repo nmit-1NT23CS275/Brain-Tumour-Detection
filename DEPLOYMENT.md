@@ -17,6 +17,9 @@ streamlit run app.py
 4. Set the entrypoint to `app.py`.
 5. Upload or mount the trained model and required artifacts.
 
+When `models/exports/best_model.keras` is missing, MRI scan controls are disabled.
+Do not enable scan predictions using an untrained fallback model.
+
 The `runtime.txt` pin is required because the application uses TensorFlow 2.15.0,
 which does not provide a Python 3.14 wheel. `setuptools<81` is retained as a
 compatibility guard for build environments that still import `pkg_resources`;

@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 import pytest
 
+from model import cnn_model
 from model.cnn_model import CLASS_NAMES, predict, get_model_metadata, load_model
 from preprocessing.image_processing import validate_mri_image_quality, preprocess_array
 
@@ -24,6 +25,15 @@ def test_model_metadata_valid():
     assert isinstance(meta, dict)
     assert "model_name" in meta
     assert "model_path" in meta
+
+
+def test_load_model_requires_trained_artifact(tmp_path, monkeypatch):
+    """Missing weights must not silently activate an untrained or mocked classifier."""
+    monkeypatch.setattr(cnn_model, "MODEL_PATH", str(tmp_path / "missing.keras"))
+    monkeypatch.setattr(cnn_model, "_CACHED_MODEL", None)
+
+    with pytest.raises(FileNotFoundError, match="trained MRI classifier is unavailable"):
+        load_model()
 
 
 def test_quality_gate_rejection():
@@ -49,8 +59,24 @@ def test_quality_gate_rejection():
     assert "color saturation" in msg_color.lower() or "grayscale" in msg_color.lower()
 
 
-def test_predict_schema_and_probability_sum():
+def test_predict_schema_and_probability_sum(monkeypatch):
     """Verify predict() returns complete result schema with normalized probabilities."""
+    class StubModel:
+        def predict(self, model_input, verbose=0):
+            return np.array([[0.1, 0.2, 0.6, 0.1]])
+
+    monkeypatch.setattr(cnn_model, "load_model", lambda: StubModel())
+    monkeypatch.setattr(
+        cnn_model,
+        "get_model_metadata",
+        lambda: {"model_name": "VGG16", "model_version": "test"},
+    )
+    monkeypatch.setattr(
+        cnn_model,
+        "get_backbone_and_preprocess",
+        lambda _: (None, lambda model_input: model_input),
+    )
+
     # Generate synthetic gray MRI-like scan with non-zero contrast
     synthetic_mri = np.random.randint(40, 200, size=(224, 224, 3), dtype=np.uint8)
     # Ensure R=G=B channels (grayscale)
